@@ -1,0 +1,245 @@
+https://hackernoon.com/quickly-spin-up-an-aws-eks-kubernetes-cluster-using-cloudformation-3d59c56b292e
+
+
+Quickly spin up an AWS EKS Kubernetes cluster using CloudFormation
+Now that AWS EKS is generally available its time to give it a try…
+
+I’ve been using AWS Elastic Container Service (ECS) for a few years now and absolutely love Docker and container management. Rolling deployments, Microservices, CI/CD pipelines, etc… What’s not to love?
+
+Kubernetes seems to be the big winner in Container Management though… and now that AWS EKS is generally available it might be time to give it a try.
+
+So that’s what I did.
+
+In this tutorial I will show you how to quickly spin up an AWS EKS Kubernetes cluster using CloudFormation.
+
+Here is the code:
+
+https://github.com/thestacks-io/eks-cluster
+https://github.com/thestacks-io/eks-microservice
+First lets get the EKS cluster up and then we can deploy our first microservice.
+
+Prerequisites
+Before we can start we need to setup some accounts and command-line utilities:
+
+AWS Account
+EC2 Key Pair — Create an EC2 Key Pair if you don’t already have one.
+cim.sh — npm install -g cim
+AWS CLI — Amazon EKS requires at least version 1.15.32 of the AWS CLI
+kubectl & heptio-authenticator-aws
+AWS EKS Cluster
+Fork this repo and clone it locally. https://github.com/thestacks-io/eks-cluster
+
+This project contains 3 CloudFormation scripts. They must be created in order because they depend on each other:
+
+VPC
+Kubernetes Cluster (EKS)
+Worker Nodes (EC2)
+VPC
+This creates the Amazon Virtual Private Cloud that our Kubernetes cluster will run inside.
+
+Amazon Virtual Private Cloud (Amazon VPC) lets you provision a logically isolated section of the AWS Cloud where you can launch AWS resources in a virtual network that you define.
+Update the vpc/_cim.yml file and add your KeyPairName CloudFormation input parameter. Also take note of the stack name. This is needed as an input parameter for the other CloudFormation scripts. This is how we share infrastructure between scripts.
+
+cd vpc
+cim stack-up
+Cluster
+This creates the AWS Kubernetes EKS Cluster that our worker nodes will be associated with.
+
+Amazon Elastic Container Service for Kubernetes (Amazon EKS) makes it easy to deploy, manage, and scale containerized applications using Kubernetes on AWS.
+Make sure the VPCStack input parameter in cluster/_cim.yml matches the stack name from your VPC stack.
+
+cd cluster
+cim stack-up
+Record the ClusterName and ClusterEndpoint outputs because they are needed in the next few steps.
+
+Also log into your aws account and record your new AWS EKS Kubernetes Base64 Encoded CA Cert. It is also needed in a later step.
+
+Nodes
+This creates the EC2 nodes that will run our Kubernetes containers.
+
+Amazon Elastic Compute Cloud (Amazon EC2) is a web service that provides secure, resizable compute capacity in the cloud. It is designed to make web-scale cloud computing easier for developers.
+Copy the ClusterName output from the previous step into the corresponding ClusterName parameter within nodes/_cim.yml. Also make sure the KeyName, VPCStack, and EKSStack parameters are correct.
+
+cd nodes
+cim stack-up
+Record the NodeInstanceRole output because it is needed later.
+
+Client Setup
+Once all of your stacks are up it’s time to configure your local environment to connect to your new Kubernetes cluster. We also have to configure your worker nodes and associate them with your cluster.
+
+https://docs.aws.amazon.com/eks/latest/userguide/getting-started.html#eks-configure-kubectl
+
+Configure kubectl for Amazon EKS
+We need to configure kubectl so it knows how to authenticate and connect to your new AWS EKS Kubernetes cluster.
+
+kubectl uses config files called kubeconfig to store your cluster information.
+
+To create your kubeconfig file:
+
+1.) Create the default ~/.kube directory if it does not already exist.
+
+mkdir -p ~/.kube
+2.) Open your favorite text editor and copy the kubeconfig code block below into it.
+
+apiVersion: v1
+clusters:
+- cluster:
+    server: <endpoint-url>
+    certificate-authority-data: <base64-encoded-ca-cert>
+  name: kubernetes
+contexts:
+- context:
+    cluster: kubernetes
+    user: aws
+  name: aws
+current-context: aws
+kind: Config
+preferences: {}
+users:
+- name: aws
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1alpha1
+      command: heptio-authenticator-aws
+      args:
+        - "token"
+        - "-i"
+        - "<cluster-name>"
+        # - "-r"
+        # - "<role-arn>"
+      # env:
+        # - name: AWS_PROFILE
+        #   value: "<aws-profile>"
+3.) Replace the <endpoint-url> with the endpoint URL that was created for your cluster. This will be the ClusterEndpoint output from the cluster stack.
+
+4.) Replace the <base64-encoded-ca-cert> with the certificateAuthority.data that was created for your cluster. Log into your aws account and copy this value from your new EKS cluster.
+
+5.) Replace the <cluster-name> with your cluster name. This will be the ClusterName output from the cluster stack.
+
+6.) (Optional) To have the Heptio authenticator assume a role to perform cluster operations (instead of the default AWS credential provider chain), uncomment the -r and <role-arn> lines and substitute an IAM role ARN to use with your user.
+
+7.) (Optional) To have the Heptio authenticator always use a specific named AWS credential profile (instead of the default AWS credential provider chain), uncomment the env lines and substitute <aws-profile> with the profile name to use.
+
+8.) Save the file to the default kubectl folder, with your cluster name in the file name. For example, if your cluster name is <cluster-name>, save the file to ~/.kube/config-<cluster-name>.
+
+9.) Add that file path to your KUBECONFIG environment variable so that kubectl knows where to look for your cluster configuration.
+
+export KUBECONFIG=$KUBECONFIG:~/.kube/config-<cluster-name>
+10.) (Optional) Add the configuration to your shell initialization file so that it is configured when you open a shell.
+
+11.) Test your configuration.
+
+kubectl get svc
+Output:
+
+NAME             TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)   AGE
+svc/kubernetes   ClusterIP   10.100.0.1   <none>        443/TCP   1m
+Awesome. Now your kubectl is configured!
+
+Next we need to enable the worker nodes to join your cluster.
+
+Enable worker nodes to join your cluster
+Download, edit, and apply the AWS authenticator configuration map:
+
+1.) Download the configuration map.
+
+curl -O https://amazon-eks.s3-us-west-2.amazonaws.com/1.10.3/2018-06-05/aws-auth-cm.yaml
+2.) Open the file with your favorite text editor. Replace the <ARN of instance role (not instance profile)> snippet with the NodeInstanceRole value that you recorded in the previous procedure, and save the file.
+
+This will be the NodeInstanceRole output from the nodes stack.
+
+Important
+
+Do not modify any other lines in this file.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aws-auth
+  namespace: kube-system
+data:
+  mapRoles: |
+    - rolearn: <ARN of instance role (not instance profile)>
+      username: system:node:{{EC2PrivateDNSName}}
+      groups:
+        - system:bootstrappers
+        - system:nodes
+3.) Apply the configuration. This command may take a few minutes to finish.
+
+kubectl apply -f aws-auth-cm.yaml
+4.) Watch the status of your nodes and wait for them to reach the Ready status.
+
+kubectl get nodes --watch
+Congratulations — Your new AWS EKS Kubernetes cluster is ready.
+
+Now it’s time to deploy our first microservice.
+
+Microservice Web Application
+Fork this repo and clone it locally. https://github.com/thestacks-io/eks-microservice
+
+Our microservice web application is a simple express.js skeleton. We use CodePipeline, CodeBuild, and ECR to build, test, publish, and deploy the app to our new Kubernetes cluster.
+
+Microservice Stack
+1.) Update the input parameters within _cim.yml.
+
+parameters:
+    AppName: 'eks-test'
+    GitHubOwner: 'thestacks-io'
+    GitHubRepo: 'eks-microservice'
+    GitHubToken: '${kms.decrypt(AQICAHgiu9XuQb...mJrnw==)}'
+You will need to replace the GitHubOwner, GitHubRepo, and GitHubToken. Follow the steps below to encrypt your GitHubToken. Click here to get your Github personal access token. Your token will need the following permissions admin:repo_hook, repo.
+
+Encrypt Secrets:
+
+In order to protect your configuration secrets like your GitHub token we need to create a KMS key first.
+
+Open the AWS console to KMS and create a new KMS key.
+Install https://github.com/ddffx/kms-cli and setup your AWS environment vars.
+Encrypt each string as outlined below.
+Add the encrypted strings to the _cim.yml. The format is ${kms.decrypt(<encreted string>)}
+How to Encrypt:
+
+Create a file called encrypt.json
+
+{
+  "keyId" : "<your kms key id>",
+  "plainText": "<your client id>",
+  "awsRegion": "<aws region>",
+  "awsProfile": "<aws profile"
+}
+Use this command to perform the encryption : kms-cli encrypt --file encrypt.json
+
+2.) Now we’re ready to deploy our stack.
+
+Deploy stack.
+
+cim stack-up
+Once an image is built and placed in ECR we can deploy our microservice.
+
+Record the ECRUrl stack output parameter because we will need it in the next step.
+
+3.) Configure and create the Kubernetes deployment.
+
+Update the eks-deployment.yml file and replace the <ecr-url> and <image-version>. Both of these can be found in your ECR console. The <image-version> is the first 8 characters of the commit hash that triggered the new image.
+
+Now that your eks-deployment.yml file is ready we can create the Kubernetes deployment.
+
+Create the Kubernetes deployment:
+
+kubectl create -f eks-deployment.yml
+Check the status of your pods.
+
+kubectl get pods
+4.) Create the Kumbernetes service.
+
+Create the Kubernetes service (Routing for pods)
+
+kubectl create -f eks-service.yml
+This will create a classic load balancer you can use to access your web app. You can also use the load balancer url to create a Route53 DNS route if you wish.
+
+Get domain. It may take several minutes before the IP address is available.
+
+kubectl get services -o wide
+Navigate to your new domain to see your express.js microservice.
+
+Please let me know if you have any questions during this tutorial. Thanks and good luck. I hope you’ve enjoyed it.
+
